@@ -1,0 +1,288 @@
+---
+title: "Problem Set 4 Answers"
+format: pdf
+execute:
+  echo: false
+  warning: false
+---
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(fixest)
+library(broom)
+
+nlsy <- haven::read_dta("ec423ps4/nlsy_2014_data.dta")
+
+summary_data <- nlsy |>
+  select(
+    caseid, id, sampweight,
+    hrp1, hrp2, q3_4, dob_year,
+    hgc_mother, hgc_father, sex,
+    afqt_3, q11_5a
+  ) |>
+  mutate(
+    across(c(hrp1, hrp2, q3_4, q11_5a), \(x) if_else(x >= 0, x, NA)),
+    log_hrp1 = log(hrp1 + 1),
+    corrected_weight = sampweight / 100,
+    yschl = if_else(q3_4 == 95, 0, q3_4),
+    age = 2014 - (1900 + dob_year),
+    age_sqd = age^2,
+    mom_schl = if_else(hgc_mother >= 0, hgc_mother, NA),
+    pop_schl = if_else(hgc_father >= 0, hgc_father, NA),
+    female = sex - 1,
+    afqt = afqt_3 / 1000,
+    health_problems = q11_5a
+  )
+
+regression_data <- summary_data |>
+  select(
+    corrected_weight, log_hrp1, yschl,
+    age, age_sqd, mom_schl, pop_schl, female, afqt, health_problems
+  )
+```
+
+## Question 1
+
+The baseline model regresses log wages on education. However, this model would likely suffer from omitted variable bias, so we could include controls for experience, age, education, and ability. Other factors, such as region, might affect labour market outcomes so that they could be relevant controls.
+
+## Question 3
+
+### a)
+
+Most but not all individuals had a non-negative value for the primary work hours variable, which is consistent with some unemployment or intentional non-responses. The number of negative values is much higher for the secondary work variable, which would be consistent with fewer people working two jobs. The table includes observations with zeros as positive.
+
+```{r}
+summary_data |>
+  select(hrp1, hrp2) |>
+  pivot_longer(everything()) |>
+  mutate(not_missing = if_else(!is.na(value), 1, 0)) |>
+  group_by(name, not_missing) |>
+  summarise(count = n()) |>
+  knitr::kable()
+```
+
+### b)
+
+Values are high because they are coded in integers, with the two leftmost digits representing cents—for example, 500 stands for 5 dollars.
+
+```{r}
+summary_data |>
+  filter(!is.na(hrp1)) |>
+  pull(hrp1) |>
+  summary()
+```
+
+### c)
+
+The distribution has thin tails and is symmetric. It is centred around 8.
+
+```{r}
+hist(summary_data$log_hrp1)
+```
+
+## Question 4
+
+### a)
+
+The weight should represent the number of individuals each respondent's answers represent, so the divided weight is how many 100s of individuals each response represents. The mean is the average number of one hundred people represented by an average person in the sample.
+
+```{r}
+summary_data |>
+  pull(sampweight) |>
+  summary()
+```
+
+### b)
+
+Since the group count and the mean sample seem unrelated, the survey does not represent the population.
+
+```{r}
+mean(summary_data$corrected_weight)
+```
+
+```{r}
+sampweight_summary <- summary_data |>
+  select(id, corrected_weight) |>
+  group_by(id) |>
+  summarise(
+    mean = mean(corrected_weight),
+    count = n(),
+    min = min(corrected_weight),
+    max = max(corrected_weight)
+  )
+
+plot(sampweight_summary$mean, sampweight_summary$count)
+```
+
+### c)
+
+Since each observation is a person, these are most likely the weights for each person in the sample.
+
+## Question 5
+
+### a)
+
+For `q3_4`, the mode is to have completed high school, and the second most frequent is to have completed college. Few people drop out of university or high school.
+
+```{r}
+summary_data |>
+  group_by(q3_4) |>
+  count() |>
+  arrange(desc(n)) |>
+  head(2) |>
+  knitr::kable()
+```
+
+
+### b)
+
+We dropped six observations for individuals who did not know or refused to answer.
+
+```{r}
+summary_data |>
+  filter(is.na(yschl)) |>
+  nrow()
+```
+
+## Question 6
+
+### a)
+
+People are between 49 and 59 years old, which could mean higher wages than the average population.
+
+```{r}
+range(summary_data$age)
+```
+
+### b)
+
+We might control for age squared if we expect non-linear effects of wage, e.g., income decreases when near retirement after peaking.
+
+### c) and d)
+
+The new generation is more educated, but a gender gap persists.
+
+```{r}
+school_weighted <- summary_data |>
+  haven::zap_labels() |>
+  select(caseid, corrected_weight, female, yschl, mom_schl, pop_schl) |>
+  pivot_longer(!c(caseid, corrected_weight, female)) |>
+  filter(!is.na(value))
+
+school_weighted |>
+  mutate(
+    female = case_when(
+      name == "mom_schl" ~ 1,
+      name == "pop_schl" ~ 0,
+      TRUE ~ female
+    ),
+    name = if_else(name == "yschl", "child", "parent")
+  ) |>
+  group_by(female, name) |>
+  mutate(wyschl = (corrected_weight * value) / sum(corrected_weight)) |>
+  summarise(sum = sum(wyschl)) |>
+  pivot_wider(names_from = name, values_from = sum) |>
+  mutate(difference = child - parent) |>
+  knitr::kable()
+```
+
+### e)
+
+We observe positive correlations with both mother and father, but the correlation with the father is slightly higher.
+
+```{r}
+corr_matrix <- school_weighted |>
+  select(caseid, name, value) |>
+  pivot_wider(names_from = name, values_from = value) |>
+  select(-caseid) |>
+  as.matrix() |>
+  cor(use="complete.obs")
+
+corr_matrix[1, 2:3]
+```
+
+### f)
+
+It might measure general academic skills rather than manual or technical ones.
+
+### g)
+
+```{r}
+mean(summary_data$health_problems, na.rm = TRUE)
+```
+
+## Question 7
+
+### a)
+
+The coefficient is around 0.115, which means that each extra year increases mean education by 11.5%. This result is in line with the previous literature.
+
+```{r}
+base_model <- feols(log_hrp1 ~ yschl, regression_data, vcov = "hetero", weights = ~ corrected_weight)
+summary(base_model)
+```
+
+### b)
+
+The coefficient is now around 10.5%. The additional controls probably removed some omitted variable bias, so it is expected. Coefficients on parental schooling are positive, while age is negative. The latter is likely true because the individuals in the sample are older. The coefficient on "female" is negative, which reflects the gender wage gap.
+
+```{r}
+controls_model <- feols(
+  log_hrp1 ~ yschl + female + age + age_sqd + mom_schl + pop_schl,
+  regression_data, vcov = "hetero", weights = ~ corrected_weight
+)
+summary(controls_model)
+```
+
+### c)
+
+The coefficient is even higher, at 8.3%. The coefficient on AFQT is positive and significant, which implies the existence of ability bias.
+
+```{r}
+ability_model <- feols(
+  log_hrp1 ~ yschl + female + age + age_sqd + afqt,
+  regression_data, vcov = "hetero", weights = ~ corrected_weight
+)
+summary(ability_model)
+```
+
+### d)
+
+The coefficient is -0.38. Since schooling decisions might also affect later health outcomes, which, according to the variable definitions, affect labour market outcomes, they should be included to avoid omitted variable bias.
+
+```{r}
+health_model <- feols(
+  log_hrp1 ~ yschl + female + age + age_sqd + afqt + health_problems,
+  regression_data, vcov = "hetero", weights = ~ corrected_weight
+)
+summary(health_model)
+```
+
+### e)
+
+Each dummy is generally not statistically significant individually. Although the model is more flexible as it captures non-linear effects, the sample size might not be sufficiently large to estimate these values with precision.
+
+```{r}
+school_dummy_model <- feols(
+  log_hrp1 ~ factor(yschl) + female + age + age_sqd + afqt,
+  regression_data, vcov = "hetero", weights = ~ corrected_weight
+)
+tidy(school_dummy_model) |>
+  knitr::kable()
+```
+
+The dummies increase yearly and are statistically significant after the 16th year. This result indicates that among the most educated group, the payoff is concentrated around the ones with the highest levels of education.
+
+```{r}
+educated_model <- feols(
+  log_hrp1 ~ factor(yschl) + female + age + age_sqd + afqt,
+  filter(regression_data, yschl >= 8), vcov = "hetero", weights = ~ corrected_weight
+)
+tidy(educated_model) |>
+  knitr::kable()
+```
+
+### f)
+
+Of the variables I discuss, experience would likely be a better control than age here, given that the sample is restricted to a small range of ages. Additionally, occupation control could also be helpful. The survey team creates these based on answers to questions. As such, they could also be measured with error due to uninformative answers.
